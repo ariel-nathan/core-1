@@ -6,7 +6,11 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "podman:up": "podman-compose -f db/docker-compose.yml up -d",
+    "podman:down": "podman-compose -f db/docker-compose.yml down",
+    "podman:logs": "podman-compose -f db/docker-compose.yml logs -f",
+    "setup": "npm run podman:up && echo 'Postgres is ready!'"
   },
   "dependencies": {
     "react": "^18",
