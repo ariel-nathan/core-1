@@ -12,6 +12,7 @@ import { Progress } from "@/components/ui/progress";
 export default function Home() {
   const [input, setInput] = useState<File | null>();
   const [progress, setProgress] = useState(0);
+  const [embeddings, setEmbeddings] = useState<string[]>([]);
 
   const pipelines = usePipeline("feature-extraction", "Supabase/gte-small");
 
@@ -32,7 +33,6 @@ export default function Home() {
 
     console.log("Total sections:", processedMd.sections.length);
 
-    const embeddings: string[] = [];
     const sectionCount = processedMd.sections.length;
     const sectionsPerWorker = Math.ceil(sectionCount / pipelines.length);
 
@@ -60,27 +60,25 @@ export default function Home() {
 
     const results = await Promise.all(promises);
     results.forEach((workerEmbeddings) => {
-      embeddings.push(...workerEmbeddings);
+      setEmbeddings((embeddings) => [...embeddings, ...workerEmbeddings]);
     });
 
     setProgress(100);
 
-    console.log("All embeddings generated");
-    console.log(embeddings);
+    console.log("All embeddings generated!");
   }
 
   return (
-    <main className="container flex grow flex-col space-y-4 py-2">
-      <div className="max-w-sm">
-        <Label>File</Label>
-        <Input
-          type="file"
-          accept=".md"
-          onChange={(event) =>
-            setInput(event.target.files && event.target.files[0])
-          }
-        />
-      </div>
+    <main className="container flex grow flex-col space-y-4 py-4">
+      <Input
+        type="file"
+        accept=".md"
+        className="max-w-sm"
+        onChange={(event) => {
+          setProgress(0);
+          setInput(event.target.files && event.target.files[0]);
+        }}
+      />
       <Progress value={progress} className="max-w-sm" />
       <Button
         disabled={!input || !isReady || progress !== 0}
@@ -93,6 +91,16 @@ export default function Home() {
             ? "Done!"
             : "Generating..."}
       </Button>
+      <div className="max-w-sm">
+        <Label>Embeddings</Label>
+        <pre className="overflow-y-auto rounded border p-2">
+          {embeddings.length === 0
+            ? "No embeddings generated"
+            : embeddings.map((embedding, index) => (
+                <div key={index}>{embedding}</div>
+              ))}
+        </pre>
+      </div>
     </main>
   );
 }
