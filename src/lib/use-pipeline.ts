@@ -12,75 +12,69 @@ export type PipeParameters = Parameters<Pipeline["_call"]>;
 export type PipeReturnType = Awaited<ReturnType<Pipeline["_call"]>>;
 export type PipeFunction = (...args: PipeParameters) => Promise<PipeReturnType>;
 
-/**
- * Hook to build a Transformers.js pipeline function.
- *
- * Similar to `pipeline()`, but runs inference in a separate
- * Web Worker thread and asynchronous logic is
- * abstracted for you.
- *
- * *Important:* `options` must be memoized (if passed),
- * otherwise the hook will continuously rebuild the pipeline.
- */
+const WORKER_COUNT = 10; // Number of workers in the pool
+
 export function usePipeline(
   task: PipelineType,
   model?: string,
   options?: PretrainedOptions,
 ) {
-  const [worker, setWorker] = useState<Worker>();
-  const [pipe, setPipe] = useState<PipeFunction>();
+  const [workers, setWorkers] = useState<Worker[]>([]);
+  const [pipes, setPipes] = useState<PipeFunction[]>([]);
 
-  // Using `useEffect` + `useState` over `useMemo` because we need a
-  // cleanup function and asynchronous initialization
   useEffect(() => {
     const { progress_callback, ...transferableOptions } = options ?? {};
+    const newWorkers: Worker[] = [];
 
-    const worker = new Worker(new URL("./worker.ts", import.meta.url), {
-      type: "module",
-    });
+    for (let i = 0; i < WORKER_COUNT; i++) {
+      const worker = new Worker(new URL("./worker.ts", import.meta.url), {
+        type: "module",
+      });
 
-    const onMessageReceived = (e: MessageEvent<OutgoingEventData>) => {
-      const { type } = e.data;
+      const onMessageReceived = (e: MessageEvent<OutgoingEventData>) => {
+        const { type } = e.data;
 
-      switch (type) {
-        case "progress": {
-          const { data } = e.data;
-          progress_callback?.(data);
-          break;
+        switch (type) {
+          case "progress": {
+            const { data } = e.data;
+            progress_callback?.(data);
+            break;
+          }
+          case "ready": {
+            newWorkers.push(worker);
+            if (newWorkers.length === WORKER_COUNT) {
+              setWorkers(newWorkers);
+            }
+            break;
+          }
         }
-        case "ready": {
-          setWorker(worker);
-          break;
-        }
-      }
-    };
+      };
 
-    worker.addEventListener("message", onMessageReceived);
+      worker.addEventListener("message", onMessageReceived);
 
-    worker.postMessage({
-      type: "init",
-      args: [task, model, transferableOptions],
-    } satisfies InitEventData);
+      worker.postMessage({
+        type: "init",
+        args: [task, model, transferableOptions],
+      } satisfies InitEventData);
+    }
 
     return () => {
-      worker.removeEventListener("message", onMessageReceived);
-      worker.terminate();
-
-      setWorker(undefined);
+      newWorkers.forEach((worker) => {
+        worker.terminate();
+      });
+      setWorkers([]);
     };
   }, [task, model, options]);
 
-  // Using `useEffect` + `useState` over `useMemo` because we need a
-  // cleanup function
   useEffect(() => {
-    if (!worker) {
+    if (workers.length !== WORKER_COUNT) {
       return;
     }
 
-    // ID to sync return values between multiple ongoing pipe executions
-    let currentId = 0;
-
-    const callbacks = new Map<number, (data: PipeReturnType) => void>();
+    const callbacksMap = new Map<
+      Worker,
+      Map<number, (data: PipeReturnType) => void>
+    >();
 
     const onMessageReceived = (e: MessageEvent<OutgoingEventData>) => {
       switch (e.data.type) {
@@ -88,6 +82,13 @@ export function usePipeline(
           const { id, data: serializedData } = e.data;
           const { type, data, dims } = serializedData;
           const output = new Tensor(type, data, dims);
+          const worker = e.currentTarget as Worker;
+          const callbacks = callbacksMap.get(worker);
+
+          if (!callbacks) {
+            throw new Error(`Missing callbacks map for worker`);
+          }
+
           const callback = callbacks.get(id);
 
           if (!callback) {
@@ -99,28 +100,38 @@ export function usePipeline(
       }
     };
 
-    worker.addEventListener("message", onMessageReceived);
+    const newPipes: PipeFunction[] = workers.map((worker) => {
+      let currentId = 0;
+      const callbacks = new Map<number, (data: PipeReturnType) => void>();
+      callbacksMap.set(worker, callbacks);
 
-    const pipe: PipeFunction = (...args) => {
-      if (!worker) {
-        throw new Error("Worker unavailable");
-      }
+      worker.addEventListener("message", onMessageReceived);
 
-      const id = currentId++;
+      const pipe: PipeFunction = (...args) => {
+        if (!worker) {
+          throw new Error("Worker unavailable");
+        }
 
-      return new Promise<PipeReturnType>((resolve) => {
-        callbacks.set(id, resolve);
-        worker.postMessage({ type: "run", id, args } satisfies RunEventData);
-      });
-    };
+        const id = currentId++;
 
-    setPipe(() => pipe);
+        return new Promise<PipeReturnType>((resolve) => {
+          callbacks.set(id, resolve);
+          worker.postMessage({ type: "run", id, args } satisfies RunEventData);
+        });
+      };
+
+      return pipe;
+    });
+
+    setPipes(newPipes);
 
     return () => {
-      worker?.removeEventListener("message", onMessageReceived);
-      setPipe(undefined);
+      workers.forEach((worker) => {
+        worker.removeEventListener("message", onMessageReceived);
+      });
+      setPipes([]);
     };
-  }, [worker]);
+  }, [workers]);
 
-  return pipe;
+  return pipes;
 }

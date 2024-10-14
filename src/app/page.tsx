@@ -13,17 +13,14 @@ export default function Home() {
   const [input, setInput] = useState<File | null>();
   const [progress, setProgress] = useState(0);
 
-  const generateEmbedding = usePipeline(
-    "feature-extraction",
-    "Supabase/gte-small",
-  );
+  const pipelines = usePipeline("feature-extraction", "Supabase/gte-small");
 
-  const isReady = useMemo(() => !!generateEmbedding, [generateEmbedding]);
+  const isReady = useMemo(() => pipelines.length > 0, [pipelines]);
 
   async function handleSubmit() {
     setProgress(0);
 
-    if (!generateEmbedding) {
+    if (pipelines.length === 0) {
       throw new Error("Unable to generate embeddings");
     }
 
@@ -35,21 +32,36 @@ export default function Home() {
 
     console.log("Total sections:", processedMd.sections.length);
 
-    const embeddings = [];
-    for (const section of processedMd.sections) {
-      const output = await generateEmbedding(section.content, {
-        pooling: "mean",
-        normalize: true,
-      });
+    const embeddings: string[] = [];
+    const sectionCount = processedMd.sections.length;
+    const sectionsPerWorker = Math.ceil(sectionCount / pipelines.length);
 
-      setProgress(
-        (progress) => progress + (1 / processedMd.sections.length) * 100,
-      );
+    const promises = pipelines.map(async (pipeline, index) => {
+      const start = index * sectionsPerWorker;
+      const end = Math.min(start + sectionsPerWorker, sectionCount);
+      const workerEmbeddings = [];
 
-      console.log("Embedding generated");
-      const embedding = JSON.stringify(Array.from(output.data));
-      embeddings.push(embedding);
-    }
+      for (let i = start; i < end; i++) {
+        const section = processedMd.sections[i];
+        const output = await pipeline(section.content, {
+          pooling: "mean",
+          normalize: true,
+        });
+
+        setProgress((progress) => progress + (1 / sectionCount) * 100);
+
+        console.log("Embedding generated");
+        const embedding = JSON.stringify(Array.from(output.data));
+        workerEmbeddings.push(embedding);
+      }
+
+      return workerEmbeddings;
+    });
+
+    const results = await Promise.all(promises);
+    results.forEach((workerEmbeddings) => {
+      embeddings.push(...workerEmbeddings);
+    });
 
     setProgress(100);
 
